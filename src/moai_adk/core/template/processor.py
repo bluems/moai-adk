@@ -456,12 +456,15 @@ class TemplateProcessor:
         package_root = current_file.parent.parent.parent
         return package_root / "templates"
 
-    def _substitute_variables(self, content: str) -> tuple[str, list[str]]:
+    def _substitute_variables(self, content: str, json_safe: bool = False) -> tuple[str, list[str]]:
         """
         Substitute template variables in content with enhanced validation and caching.
 
         Args:
             content: Content to substitute variables in
+            json_safe: If True, escape values for safe insertion inside JSON string
+                literals. Use this when substituting into .json files to prevent
+                values containing double quotes or backslashes from breaking JSON syntax.
 
         Returns:
             Tuple of (substituted_content, warnings_list)
@@ -470,7 +473,7 @@ class TemplateProcessor:
         logger = logging.getLogger(__name__)
 
         # Check cache first if enabled
-        cache_key = hash((frozenset(self.context.items()), content[:1000]))
+        cache_key = hash((frozenset(self.context.items()), content[:1000], json_safe))
         if self.config.enable_caching and cache_key in self._substitution_cache:
             cached_result = self._substitution_cache[cache_key]
             if self.config.verbose_logging:
@@ -488,7 +491,10 @@ class TemplateProcessor:
                         warnings.append(f"Invalid variable {key} - skipped substitution")
                         continue
 
-                safe_value = self._sanitize_value(value)
+                if json_safe:
+                    safe_value = self._sanitize_value_for_json(value)
+                else:
+                    safe_value = self._sanitize_value(value)
                 content = content.replace(placeholder, safe_value)
                 substitution_count += 1
 
@@ -608,6 +614,26 @@ class TemplateProcessor:
         value = value.replace("{{", "").replace("}}", "")
         return value
 
+    def _sanitize_value_for_json(self, value: str) -> str:
+        """Sanitize value for safe insertion inside JSON string literals.
+
+        Applies standard sanitization, then escapes characters that have
+        special meaning in JSON strings (double quotes, backslashes, etc.).
+
+        This is critical for values like HOOK_SHELL_PREFIX which contain
+        shell commands with double quotes (e.g., export PATH="...").
+
+        Args:
+            value: Value to sanitize.
+
+        Returns:
+            JSON-safe sanitized value.
+        """
+        value = self._sanitize_value(value)
+        # Use json.dumps to properly escape all JSON special characters,
+        # then strip the surrounding quotes to get the inner escaped content
+        return json.dumps(value)[1:-1]
+
     def _is_text_file(self, file_path: Path) -> bool:
         """Check if file is text-based (not binary).
 
@@ -702,7 +728,8 @@ class TemplateProcessor:
         if self._is_text_file(src) and self.context:
             try:
                 content = src.read_text(encoding="utf-8", errors="replace")
-                content, file_warnings = self._substitute_variables(content)
+                is_json = src.suffix.lower() == ".json"
+                content, file_warnings = self._substitute_variables(content, json_safe=is_json)
 
                 # Apply description localization for command/output-style files
                 if src.suffix == ".md" and ("commands/alfred" in str(src) or "output-styles/alfred" in str(src)):
@@ -947,7 +974,7 @@ class TemplateProcessor:
                         # Apply variable substitution
                         if self.context:
                             content = settings_dst.read_text(encoding="utf-8", errors="replace")
-                            content, file_warnings = self._substitute_variables(content)
+                            content, file_warnings = self._substitute_variables(content, json_safe=True)
                             settings_dst.write_text(content, encoding="utf-8", errors="replace")
                             all_warnings.extend(file_warnings)
                         if not silent:
@@ -967,7 +994,7 @@ class TemplateProcessor:
                             (
                                 template_content,
                                 sub_warnings,
-                            ) = self._substitute_variables(template_content)
+                            ) = self._substitute_variables(template_content, json_safe=True)
                             all_warnings.extend(sub_warnings)
                             # Write substituted content to a temporary location for merging
                             with tempfile.NamedTemporaryFile(
@@ -991,7 +1018,7 @@ class TemplateProcessor:
                         # Apply variable substitution to merged settings.json (for any remaining variables)
                         if self.context:
                             content = settings_dst.read_text(encoding="utf-8", errors="replace")
-                            content, file_warnings = self._substitute_variables(content)
+                            content, file_warnings = self._substitute_variables(content, json_safe=True)
                             settings_dst.write_text(content, encoding="utf-8", errors="replace")
                             all_warnings.extend(file_warnings)
                         if not silent:
@@ -1596,7 +1623,7 @@ class TemplateProcessor:
 
         # Read template content and apply variable substitution
         template_content = src.read_text(encoding="utf-8", errors="replace")
-        substituted_content, warnings = self._substitute_variables(template_content)
+        substituted_content, warnings = self._substitute_variables(template_content, json_safe=True)
 
         # Show warnings if any
         for warning in warnings:
